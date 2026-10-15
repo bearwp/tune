@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/bear/charmkit"
-	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/progress"
@@ -156,7 +155,6 @@ type Model struct {
 	libraryList   list.Model
 	queueList     list.Model
 	progress      progress.Model
-	help          help.Model
 	input         textinput.Model
 	adding        bool
 	focus         focus
@@ -167,7 +165,6 @@ type Model struct {
 	paneH         int
 	wide          bool
 	showHeader    bool
-	showFooter    bool
 	compactHeader bool
 	shuffle       bool
 	repeat        bool
@@ -186,12 +183,14 @@ func NewModel(library []track, p *Player) Model {
 	libList.SetShowTitle(false)
 	libList.SetShowStatusBar(false)
 	libList.SetShowHelp(false)
+	libList.SetShowPagination(false)
 	libList.SetFilteringEnabled(false)
 
 	queueList := list.New([]list.Item{}, trackDelegate{showStaged: false, focused: false}, 0, 0)
 	queueList.SetShowTitle(false)
 	queueList.SetShowStatusBar(false)
 	queueList.SetShowHelp(false)
+	queueList.SetShowPagination(false)
 	queueList.SetFilteringEnabled(false)
 
 	prog := progress.New(progress.WithScaledGradient("2", "7"))
@@ -208,7 +207,6 @@ func NewModel(library []track, p *Player) Model {
 		libraryList: libList,
 		queueList:   queueList,
 		progress:    prog,
-		help:        help.New(),
 		input:       in,
 		focus:       focusLibrary,
 		current:     -1,
@@ -442,10 +440,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.adding = false
 				m.input.SetValue("")
 				m.input.Blur()
+				if m.width > 0 {
+					m.resize()
+				}
 			case key.Matches(msg, keys.Cancel):
 				m.adding = false
 				m.input.SetValue("")
 				m.input.Blur()
+				if m.width > 0 {
+					m.resize()
+				}
 			default:
 				var icmd tea.Cmd
 				m.input, icmd = m.input.Update(msg)
@@ -460,6 +464,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case key.Matches(msg, keys.Help):
 			m.showHelp = !m.showHelp
+			if m.width > 0 {
+				m.resize()
+			}
 			return m, nil
 		case key.Matches(msg, keys.Tab):
 			if m.focus == focusLibrary {
@@ -477,6 +484,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.Add):
 			m.adding = true
 			m.input.Focus()
+			if m.width > 0 {
+				m.resize()
+			}
 			return m, nil
 		case key.Matches(msg, keys.Unstage):
 			if m.focus == focusQueue {
@@ -530,7 +540,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) resize() {
 	headerFull := 4    // border + title + progress
 	headerCompact := 3 // border + title only
-	footerH := 3
 
 	m.wide = m.width >= 72
 	if m.wide {
@@ -539,24 +548,23 @@ func (m *Model) resize() {
 		m.paneW = m.width
 	}
 
-	// Panes are the flexible region. As the terminal shrinks we drop the
-	// footer, collapse the header to a single line, and only then remove it,
-	// so "now playing" stays visible as long as possible.
+	// The bottom bar always takes at least one row (short help or the add-path
+	// prompt) and grows to the full table when help is expanded.
+	footerH := m.footerH()
+
+	// Panes are the flexible region. As the terminal shrinks we collapse the
+	// header to a single line, then drop it entirely, so "now playing" stays
+	// visible as long as possible. The bottom bar is always shown.
 	m.showHeader = true
-	m.showFooter = true
 	m.compactHeader = false
 	m.paneH = m.height - headerFull - footerH
 	if m.paneH < 3 {
-		m.showFooter = false
-		m.paneH = m.height - headerFull
-	}
-	if m.paneH < 3 {
 		m.compactHeader = true
-		m.paneH = m.height - headerCompact
+		m.paneH = m.height - headerCompact - footerH
 	}
 	if m.paneH < 3 {
 		m.showHeader = false
-		m.paneH = m.height
+		m.paneH = m.height - footerH
 	}
 	if m.paneH < 3 {
 		m.paneH = 3
@@ -581,20 +589,32 @@ func (m Model) View() string {
 
 	var parts []string
 	if m.showHeader {
-		parts = append(parts, box.Width(m.width).Render(m.headerContent()))
+		parts = append(parts, box.Width(m.width-2).Render(m.headerContent()))
 	}
 	parts = append(parts, m.bodyView())
-	if m.showFooter {
-		parts = append(parts, box.Width(m.width).Render(m.footerContent()))
-	}
-	out := lipgloss.JoinVertical(lipgloss.Left, parts...)
+	parts = append(parts, m.footer())
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+}
+
+// footerH returns how many rows the bottom bar needs: one line for the short
+// help or the add-path prompt, or the full binding table when help is open.
+func (m Model) footerH() int {
 	if m.adding {
-		out += "\n" + m.input.View()
+		return 1
 	}
 	if m.showHelp {
-		out += "\n" + m.help.View(keys)
+		return len(strings.Split(charmkit.Help(m.width, keys.ShortHelp(), keys.FullHelp(), true), "\n"))
 	}
-	return out
+	return 1
+}
+
+// footer renders the bottom bar: the add-path prompt while entering a path,
+// otherwise the (short or full) keybinding help shared via charmkit.
+func (m Model) footer() string {
+	if m.adding {
+		return m.input.View()
+	}
+	return charmkit.Help(m.width, keys.ShortHelp(), keys.FullHelp(), m.showHelp)
 }
 
 func (m Model) pane(title, items string, focused bool, w, h int) string {
@@ -607,7 +627,9 @@ func (m Model) pane(title, items string, focused bool, w, h int) string {
 		style = style.BorderForeground(subtle)
 	}
 	content := lipgloss.JoinVertical(lipgloss.Left, titleS.Render(title), items)
-	return style.Width(w).Height(h).Render(content)
+	// Width/Height size the content area; the rounded border adds two columns
+	// and two rows on top, so back it out to hit w×h exactly.
+	return style.Width(w - 2).Height(h - 2).Render(content)
 }
 
 func (m Model) bodyView() string {
@@ -626,11 +648,11 @@ func (m Model) bodyView() string {
 func (m Model) headerContent() string {
 	if len(m.queue) == 0 || m.current < 0 {
 		if m.compactHeader {
-			return mutedStyle.Render("nothing playing")
+			return mutedStyle.Render(truncate("nothing playing", m.width-4))
 		}
 		return lipgloss.JoinVertical(lipgloss.Left,
-			mutedStyle.Render("nothing playing"),
-			mutedStyle.Render("space to stage · enter to play"),
+			mutedStyle.Render(truncate("nothing playing", m.width-4)),
+			mutedStyle.Render(truncate("space to stage · enter to play", m.width-4)),
 		)
 	}
 	if m.compactHeader {
@@ -702,33 +724,6 @@ func (m Model) progressLine(w int) string {
 	return lipgloss.JoinHorizontal(lipgloss.Center, bar, "  "+times)
 }
 
-func (m Model) footerContent() string {
-	play := "⏸"
-	if !m.player.IsPlaying() {
-		play = "⏵"
-	}
-	left := lipgloss.JoinHorizontal(lipgloss.Center,
-		accentStyle.Render("⏮ "), accentStyle.Render(play), accentStyle.Render(" ⏭"),
-		"  ", mutedStyle.Render(fmt.Sprintf("vol %+.0f", m.player.Volume())),
-	)
-	right := "space stage · enter play · tab focus · ? help · q quit"
-
-	w := m.width - 4
-	gap := w - lipgloss.Width(left) - lipgloss.Width(right)
-	if gap < 0 {
-		right = "? help · q quit"
-		gap = w - lipgloss.Width(left) - lipgloss.Width(right)
-		if gap < 0 {
-			right = ""
-			gap = w - lipgloss.Width(left)
-		}
-	}
-	if gap < 1 {
-		gap = 1
-	}
-	return left + strings.Repeat(" ", gap) + subtleStyle.Render(right)
-}
-
 func fmtDur(d time.Duration) string {
 	d = d.Round(time.Second)
 	m := int(d.Minutes())
@@ -746,9 +741,19 @@ func truncate(s string, w int) string {
 	if w == 1 {
 		return "…"
 	}
-	runes := []rune(s)
-	if len(runes) > w-1 {
-		runes = runes[:w-1]
+	// Accumulate runes until the next one would push past w-1, reserving the
+	// last column for the ellipsis. Wide (fullwidth) runes count as two, so we
+	// must measure display width rather than count runes.
+	target := w - 1
+	var b strings.Builder
+	cur := 0
+	for _, r := range s {
+		rw := lipgloss.Width(string(r))
+		if cur+rw > target {
+			break
+		}
+		b.WriteRune(r)
+		cur += rw
 	}
-	return string(runes) + "…"
+	return b.String() + "…"
 }
